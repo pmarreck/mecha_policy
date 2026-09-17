@@ -1,0 +1,3 @@
+# Mechatron Prime CI targets — exact flake attributes, intentional set
+packages.x86_64-linux.default
+checks.x86_64-linux.test
