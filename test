@@ -1,0 +1,12 @@
+#!/usr/bin/env bash
+# The ENTIRE suite. Accumulates failures; exit code = failure count.
+set -u
+cd "$(dirname "${BASH_SOURCE[0]}")" || exit 1
+if command -v zig >/dev/null 2>&1; then NIXDEV=""; else NIXDEV="nix develop -c"; fi
+FAILS=0
+$NIXDEV zig build test -Doptimize=ReleaseSafe || FAILS=$((FAILS + 1))
+$NIXDEV zig build || FAILS=$((FAILS + 1))
+bash tests/cli/decide.sh || FAILS=$((FAILS + 1))
+echo ""
+if [[ $FAILS -eq 0 ]]; then echo "ALL PASS"; else echo "$FAILS suite(s) FAILED"; fi
+exit "$FAILS"

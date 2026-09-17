@@ -1,0 +1,6 @@
+#!/usr/bin/env bash
+# Builds via nix (canonical for CI); --debug / --test pass through to zig.
+set -u
+cd "$(dirname "${BASH_SOURCE[0]}")" || exit 1
+nix build && mkdir -p zig-out/bin zig-out/lib && cp -f result/bin/mecha-policy zig-out/bin/ 2>/dev/null; cp -f result/lib/libmecha_policy.a zig-out/lib/ 2>/dev/null
+echo "built: zig-out/bin/mecha-policy"

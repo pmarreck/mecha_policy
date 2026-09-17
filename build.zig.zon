@@ -1,0 +1,14 @@
+.{
+    .name = .mecha_policy,
+    .version = "0.1.0",
+    .minimum_zig_version = "0.16.0",
+    .dependencies = .{},
+    .paths = .{
+        "build.zig",
+        "build.zig.zon",
+        "src",
+        "include",
+        "cli",
+    },
+    .fingerprint = 0xb9a390f20427e7ca,
+}

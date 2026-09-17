@@ -1,0 +1,9 @@
+zig-out/
+zig-cache/
+.zig-cache/
+result
+result-*
+.DS_Store
+inbox/
+.codescan/
+.serena/
