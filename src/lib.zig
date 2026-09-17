@@ -232,6 +232,14 @@ export fn mecha_policy_reason_name(code: u8) [*:0]const u8 {
     return d.name().ptr;
 }
 
+/// The ABI contract version consumers were built against. Bumped ONLY on
+/// a breaking change to the exported functions or decision codes; lets
+/// validate's freshness gate and adapters assert mechanically instead of
+/// remembering (validate's counter, adopted 2026-09-17).
+export fn mecha_policy_abi_version() u32 {
+    return 1;
+}
+
 export fn mecha_policy_version() [*:0]const u8 {
     return "0.1.0";
 }
@@ -422,4 +430,8 @@ test "high-water store format: max of stored and now" {
     try t.expectEqualStrings("2026-09-17", nextHighWater("2026-09-17", null));
     try t.expectEqualStrings("2026-09-17", nextHighWater("2026-09-16", "2026-09-17"));
     try t.expectEqualStrings("2026-09-18", nextHighWater("2026-09-18", "2026-09-17"));
+}
+
+test "abi version is 1 until a breaking change bumps it" {
+    try t.expectEqual(@as(u32, 1), mecha_policy_abi_version());
 }

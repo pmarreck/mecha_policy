@@ -47,6 +47,9 @@ int32_t mecha_policy_decide(
 /* Stable name for a decision code, for status surfaces and logs. */
 const char *mecha_policy_reason_name(uint8_t code);
 
+/* The ABI contract version this header describes; assert it at startup. */
+uint32_t mecha_policy_abi_version(void);
+
 const char *mecha_policy_version(void);
 
 #endif
