@@ -2,8 +2,12 @@
 
 ## In Progress
 - [ ] Mechatron Prime CI (targets manifest + webhook + badge)
-- [ ] Negotiate ABI pin confirmation from validate (native Zig import) and
-      relay to validate_gui (they target validate's re-export)
+- [x] ABI LOCKED at 2d2a0be (abi_version 1): validate's first consuming
+      commit ba3d1f6be pins this as a build.zig.zon git dependency, asserts
+      abi_version in its status KV, embeds the vector manifest as unit
+      tests, re-exports the decision through its FFI (validate_gui consumes
+      that). Any exported-function or decision-code change now requires a
+      versioned bump. — 2026-09-19 13:15 EDT
 
 ## Future
 - [ ] `not_before` support if a future product ever mints future-dated
