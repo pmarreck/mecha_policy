@@ -22,7 +22,7 @@
           dontFixup = true;
           buildPhase = ''
             export HOME=$TMPDIR
-            ${pkgs.lib.optionalString pkgs.stdenv.isDarwin "unset NIX_CFLAGS_COMPILE NIX_LDFLAGS"}
+            ${pkgs.lib.optionalString pkgs.stdenv.hostPlatform.isDarwin "unset NIX_CFLAGS_COMPILE NIX_LDFLAGS"}
             zig build -Doptimize=ReleaseFast --prefix $out
           '';
           dontInstall = true;
@@ -39,7 +39,7 @@
             dontFixup = true;
             buildPhase = ''
               export HOME=$TMPDIR
-              ${pkgs.lib.optionalString pkgs.stdenv.isDarwin "unset NIX_CFLAGS_COMPILE NIX_LDFLAGS"}
+              ${pkgs.lib.optionalString pkgs.stdenv.hostPlatform.isDarwin "unset NIX_CFLAGS_COMPILE NIX_LDFLAGS"}
               # FLEET FLOOR — tests run ReleaseSafe (fleet finding 2026-07-01):
               # ReleaseFast compiles OUT the runtime safety checks, so a green
               # ReleaseFast suite cannot observe UB. Shipped artifact stays
