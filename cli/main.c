@@ -43,10 +43,77 @@ static void usage(FILE *out) {
 	    "Usage: mecha-policy decide --payload FILE --role beta-license|paid-license\n"
 	    "         --product ID --app-major N --now YYYY-MM-DD\n"
 	    "         [--hwm YYYY-MM-DD] [--operation OP]\n"
+	    "       mecha-policy install --cert FILE --product ID --license-sha256 HEX\n"
+	    "         --machine HEX --now YYYY-MM-DD [--hwm YYYY-MM-DD]\n"
+	    "       mecha-policy machine-hash --product ID --raw-id-file FILE\n"
 	    "       mecha-policy --help | --about\n");
 }
 
+/* `install`: decide an installation certificate. `machine-hash`: print the
+ * per-product fingerprint of a raw machine id read from a file or stdin. */
+static int cmd_install(int argc, char *argv[]) {
+	const char *cert_path = NULL, *product = NULL, *lic = NULL, *machine = NULL, *now = NULL, *hwm = NULL;
+	for (int i = 2; i < argc; i++) {
+		const char *a = argv[i];
+		if (i + 1 < argc) {
+			if (strcmp(a, "--cert") == 0) { cert_path = argv[++i]; continue; }
+			if (strcmp(a, "--product") == 0) { product = argv[++i]; continue; }
+			if (strcmp(a, "--license-sha256") == 0) { lic = argv[++i]; continue; }
+			if (strcmp(a, "--machine") == 0) { machine = argv[++i]; continue; }
+			if (strcmp(a, "--now") == 0) { now = argv[++i]; continue; }
+			if (strcmp(a, "--hwm") == 0) { hwm = argv[++i]; continue; }
+		}
+		fprintf(stderr, "mecha-policy: unknown or incomplete argument: %s\n", a);
+		usage(stderr);
+		return EX_USAGE;
+	}
+	if (!cert_path || !product || !lic || !machine || !now) { usage(stderr); return EX_USAGE; }
+	FILE *in = (strcmp(cert_path, "-") == 0 || strcmp(cert_path, "@stdin") == 0) ? stdin : fopen(cert_path, "rb");
+	if (!in) { fprintf(stderr, "mecha-policy: cannot open %s\n", cert_path); return EX_NOINPUT; }
+	size_t len = 0;
+	unsigned char *cert = slurp(in, &len);
+	if (in != stdin) fclose(in);
+	if (!cert) { fprintf(stderr, "mecha-policy: read failed\n"); return EX_SOFTWARE; }
+	int32_t rc = mecha_policy_install_decide(cert, len, product, lic, machine, now, hwm);
+	free(cert);
+	if (rc < 0) {
+		fprintf(stderr, "mecha-policy: %s\n", rc == -2 ? "invalid --now date (want YYYY-MM-DD)" :
+		    rc == -1 ? "--license-sha256 and --machine must be 64 lowercase hex characters" : "internal error");
+		return rc == -3 ? EX_SOFTWARE : EX_USAGE;
+	}
+	printf("%s\n", mecha_policy_install_reason_name((uint8_t)rc));
+	return rc == MECHA_POLICY_INSTALL_CERT_VALID ? 0 : 1;
+}
+
+static int cmd_machine_hash(int argc, char *argv[]) {
+	const char *product = NULL, *raw_path = NULL;
+	for (int i = 2; i < argc; i++) {
+		const char *a = argv[i];
+		if (i + 1 < argc) {
+			if (strcmp(a, "--product") == 0) { product = argv[++i]; continue; }
+			if (strcmp(a, "--raw-id-file") == 0) { raw_path = argv[++i]; continue; }
+		}
+		fprintf(stderr, "mecha-policy: unknown or incomplete argument: %s\n", a);
+		usage(stderr);
+		return EX_USAGE;
+	}
+	if (!product || !raw_path) { usage(stderr); return EX_USAGE; }
+	FILE *in = (strcmp(raw_path, "-") == 0 || strcmp(raw_path, "@stdin") == 0) ? stdin : fopen(raw_path, "rb");
+	if (!in) { fprintf(stderr, "mecha-policy: cannot open %s\n", raw_path); return EX_NOINPUT; }
+	size_t len = 0;
+	unsigned char *raw = slurp(in, &len);
+	if (in != stdin) fclose(in);
+	if (!raw) { fprintf(stderr, "mecha-policy: read failed\n"); return EX_SOFTWARE; }
+	char out[65];
+	mecha_policy_machine_hash(product, raw, len, out);
+	free(raw);
+	printf("%s\n", out);
+	return 0;
+}
+
 int main(int argc, char *argv[]) {
+	if (argc >= 2 && strcmp(argv[1], "install") == 0) return cmd_install(argc, argv);
+	if (argc >= 2 && strcmp(argv[1], "machine-hash") == 0) return cmd_machine_hash(argc, argv);
 	const char *payload_path = NULL, *role_s = NULL, *product = NULL;
 	const char *now = NULL, *hwm = NULL, *operation = NULL;
 	long app_major = -1;

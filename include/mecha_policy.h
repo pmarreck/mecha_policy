@@ -52,4 +52,37 @@ uint32_t mecha_policy_abi_version(void);
 
 const char *mecha_policy_version(void);
 
+/* Installation certificates (sigil contract section 15). Additive to ABI 1. */
+enum {
+	MECHA_POLICY_INSTALL_CERT_VALID = 0,
+	MECHA_POLICY_INSTALL_CERT_MALFORMED = 1,
+	MECHA_POLICY_INSTALL_CERT_WRONG_PRODUCT = 2,
+	MECHA_POLICY_INSTALL_CERT_OTHER_MACHINE = 3,
+	MECHA_POLICY_INSTALL_CERT_OTHER_LICENSE = 4,
+	MECHA_POLICY_INSTALL_CERT_EXPIRED = 5,
+	MECHA_POLICY_INSTALL_CERT_CLOCK_ROLLBACK = 6,
+};
+
+/* Decide whether a sigil-VERIFIED installation certificate admits this
+ * machine under this license. license_sha256 is the lowercase hex SHA-256
+ * of the exact imported license envelope bytes; machine is the value from
+ * mecha_policy_machine_hash. Returns a code (>= 0), or -1 malformed hash
+ * argument, -2 invalid now date, -3 allocation failure. */
+int32_t mecha_policy_install_decide(
+	const uint8_t *cert_ptr,
+	size_t cert_len,
+	const char *product,
+	const char *license_sha256,
+	const char *machine,
+	const char *now_utc_date,
+	const char *clock_high_water);
+
+const char *mecha_policy_install_reason_name(uint8_t code);
+
+/* The per-product machine fingerprint: SHA-256 over "mecha-install-v1" ||
+ * product || 0x00 || raw id (trimmed of ASCII whitespace, ASCII-lowercased),
+ * written as 64 lowercase hex characters plus a NUL into out_65. The raw id
+ * never needs to leave the machine. */
+void mecha_policy_machine_hash(const char *product, const uint8_t *raw_id, size_t raw_len, char *out_65);
+
 #endif
