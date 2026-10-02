@@ -425,6 +425,102 @@ export fn mecha_policy_machine_hash(
     @memcpy(out_65[0..64], &out);
     out_65[64] = 0;
 }
+/// Kinds of device hint the server clusters on (contract section 15.1).
+pub const HintKind = enum(u8) {
+    disk = 0,
+    mac = 1,
+    tpm = 2,
+};
+
+pub const HintError = error{
+    /// The value identifies no device (empty, randomized MAC, ...); the app
+    /// omits this hint.
+    Rejected,
+    /// Caller bug: empty product, or a product containing 0x00 that could
+    /// forge the separator.
+    InvalidArgument,
+};
+
+/// Per-product device-hint fingerprint for server-side device counting
+/// (Steam-style seat cap, trial dedupe): normalize the raw observation
+/// (disk serial trimmed and lowercased; MAC reduced to 12 hex digits and
+/// rejected unless universally administered unicast; TPM EK bytes hex-encoded)
+/// then SHA-256 over "mecha-hint-v1" || product || 0x00 || kind || 0x00 ||
+/// normalized. Domain-separated from machineHash; pseudonymous, not secret.
+pub fn hintHash(out: *[64]u8, product: []const u8, kind: HintKind, raw: []const u8) HintError!void {
+    if (product.len == 0 or std.mem.indexOfScalar(u8, product, 0) != null) return HintError.InvalidArgument;
+    var h = std.crypto.hash.sha2.Sha256.init(.{});
+    h.update("mecha-hint-v1");
+    h.update(product);
+    h.update(&[_]u8{0});
+    h.update(@tagName(kind));
+    h.update(&[_]u8{0});
+    switch (kind) {
+        .disk => {
+            const v = std.mem.trim(u8, raw, " \t\r\n");
+            if (v.len == 0) return HintError.Rejected;
+            var buf: [64]u8 = undefined;
+            var i: usize = 0;
+            while (i < v.len) {
+                const n = @min(buf.len, v.len - i);
+                for (v[i .. i + n], 0..) |ch, k| buf[k] = std.ascii.toLower(ch);
+                h.update(buf[0..n]);
+                i += n;
+            }
+        },
+        .mac => {
+            const v = std.mem.trim(u8, raw, " \t\r\n");
+            var digits: [12]u8 = undefined;
+            var n: usize = 0;
+            for (v) |ch| {
+                if (ch == ':' or ch == '-' or ch == '.') continue;
+                if (!std.ascii.isHex(ch) or n == digits.len) return HintError.Rejected;
+                digits[n] = std.ascii.toLower(ch);
+                n += 1;
+            }
+            if (n != digits.len) return HintError.Rejected;
+            const first = std.fmt.parseInt(u8, digits[0..2], 16) catch return HintError.Rejected;
+            if (first & 0x03 != 0) return HintError.Rejected; // locally administered or multicast/broadcast
+            if (std.mem.allEqual(u8, &digits, '0')) return HintError.Rejected;
+            h.update(&digits);
+        },
+        .tpm => {
+            if (raw.len == 0) return HintError.Rejected;
+            const hex = "0123456789abcdef";
+            for (raw) |b| h.update(&[_]u8{ hex[b >> 4], hex[b & 0x0f] });
+        },
+    }
+    var digest: [32]u8 = undefined;
+    h.final(&digest);
+    out.* = std.fmt.bytesToHex(digest, .lower);
+}
+
+/// C ABI for hintHash with length-delimited buffers: writes exactly 64
+/// lowercase hex bytes (no NUL) into out and returns 64; -1 invalid argument
+/// (unknown kind, NULL with a nonzero length, empty or NUL-bearing product),
+/// -2 value rejected (omit the hint), -3 out_cap below 64.
+export fn mecha_policy_hint_hash(
+    product: ?[*]const u8,
+    product_len: usize,
+    kind: u8,
+    value: ?[*]const u8,
+    value_len: usize,
+    out: ?[*]u8,
+    out_cap: usize,
+) i32 {
+    if (kind > @intFromEnum(HintKind.tpm)) return -1;
+    if (product == null or out == null or (value == null and value_len != 0)) return -1;
+    if (out_cap < 64) return -3;
+    const v: []const u8 = if (value) |p| p[0..value_len] else &.{};
+    var hex: [64]u8 = undefined;
+    hintHash(&hex, product.?[0..product_len], @enumFromInt(kind), v) catch |e| return switch (e) {
+        HintError.InvalidArgument => -1,
+        HintError.Rejected => -2,
+    };
+    @memcpy(out.?[0..64], &hex);
+    return 64;
+}
+
 // ── Tests ───────────────────────────────────────────────────────────
 // The eval table is copied verbatim from sigil examples/license_vectors/
 // manifest.json (schema mecha-license-vectors/1, sigil commit dfbc0e3) —
@@ -716,4 +812,81 @@ test "install reason names are distinct and prefixed" {
         const d: InstallDecision = @enumFromInt(f.value);
         try t.expect(std.mem.startsWith(u8, d.name(), "install_cert_"));
     }
+}
+
+// ── Device hints (sigil contract section 15.1) ─────────────────────
+// Known answers copied verbatim from sigil examples/hint_vectors/
+// manifest.json (mecha-hint-vectors/1), computed there by coreutils
+// sha256sum from hand-written normalized values.
+const hv_disk_v = "5523b5c4c4f35cfa51902d46ae87874dca53fa4211eacb4de732477ce8c28fbd";
+const hv_mac_v = "12efd76b67bd639c1985baffb76b59acea7f0021b3629c0fcdbfcb81d8586956";
+const hv_tpm_nul = "36a4abcb1cd52f6186294ee07321c41776badf1be341982e220b6b5fd7a06950";
+const hv_tpm_00ff00 = "8c63a9053792f3bc03de6178f0210fb284608ecb1df037923641827e473b87b5";
+
+test "hint hash: disk serial trims and lowercases to the coreutils answer" {
+    var out: [64]u8 = undefined;
+    try hintHash(&out, "mecha-validate", .disk, "S4EWNX0R123456K");
+    try t.expectEqualStrings(hv_disk_v, &out);
+    try hintHash(&out, "mecha-validate", .disk, "  S4EWNX0R123456K \n");
+    try t.expectEqualStrings(hv_disk_v, &out);
+    try hintHash(&out, "mecha-rotshield", .disk, "S4EWNX0R123456K");
+    try t.expect(!std.mem.eql(u8, hv_disk_v, &out));
+}
+
+test "hint hash: every MAC spelling of one address gives one hint" {
+    var out: [64]u8 = undefined;
+    for ([_][]const u8{ "00:1A:2B:3C:4D:5E", "00-1a-2b-3c-4d-5e", "001a.2b3c.4d5e", "001A2B3C4D5E\n" }) |m| {
+        try hintHash(&out, "mecha-validate", .mac, m);
+        try t.expectEqualStrings(hv_mac_v, &out);
+    }
+}
+
+test "hint hash: TPM bytes are hex-encoded and 0x00 is data, not a terminator" {
+    var out: [64]u8 = undefined;
+    try hintHash(&out, "mecha-validate", .tpm, "\x52\x53\x41\x31\x00\x00\x00");
+    try t.expectEqualStrings(hv_tpm_nul, &out);
+    var other: [64]u8 = undefined;
+    try hintHash(&other, "mecha-validate", .tpm, "\x52\x53\x41\x31\x00\x00");
+    try t.expect(!std.mem.eql(u8, &out, &other));
+    // Hex letters must be lowercase: 0x00 0xff 0x00 is "00ff00".
+    try hintHash(&out, "mecha-validate", .tpm, "\x00\xff\x00");
+    try t.expectEqualStrings(hv_tpm_00ff00, &out);
+}
+
+test "hint hash: rejects exactly the contract's non-identifying values" {
+    var out: [64]u8 = undefined;
+    const rejects = [_]struct { k: HintKind, v: []const u8 }{
+        .{ .k = .disk, .v = "" },                     .{ .k = .disk, .v = " \t\r\n" },
+        .{ .k = .mac, .v = "" },                      .{ .k = .mac, .v = "02:1a:2b:3c:4d:5e" },
+        .{ .k = .mac, .v = "01:00:5e:00:00:01" },     .{ .k = .mac, .v = "ff:ff:ff:ff:ff:ff" },
+        .{ .k = .mac, .v = "00:00:00:00:00:00" },     .{ .k = .mac, .v = "00:1a:2b:3c:4d" },
+        .{ .k = .mac, .v = "00:1a:2b:3c:4d:5e:6f" }, .{ .k = .mac, .v = "00:1a:2b:3c:4d:5g" },
+        .{ .k = .mac, .v = "00 1a 2b 3c 4d 5e" },     .{ .k = .tpm, .v = "" },
+    };
+    for (rejects) |r| try t.expectError(HintError.Rejected, hintHash(&out, "mecha-validate", r.k, r.v));
+    // Universally administered unicast with a high first octet is accepted.
+    try hintHash(&out, "mecha-validate", .mac, "fc:aa:14:00:00:01");
+}
+
+test "hint hash: a product that could forge the 0x00 separator is refused" {
+    var out: [64]u8 = undefined;
+    try t.expectError(HintError.InvalidArgument, hintHash(&out, "", .disk, "x"));
+    try t.expectError(HintError.InvalidArgument, hintHash(&out, "mecha\x00validate", .disk, "x"));
+}
+
+test "hint hash C export: length-delimited in and out, bounded, no terminator" {
+    var out = [_]u8{'#'} ** 70;
+    const p = "mecha-validate";
+    const tpm = "\x52\x53\x41\x31\x00\x00\x00";
+    try t.expectEqual(@as(i32, 64), mecha_policy_hint_hash(p, p.len, 2, tpm, tpm.len, &out, out.len));
+    try t.expectEqualStrings(hv_tpm_nul, out[0..64]);
+    try t.expectEqual(@as(u8, '#'), out[64]);
+    try t.expectEqual(@as(i32, -3), mecha_policy_hint_hash(p, p.len, 2, tpm, tpm.len, &out, 63));
+    try t.expectEqual(@as(i32, -2), mecha_policy_hint_hash(p, p.len, 2, tpm, 0, &out, out.len));
+    try t.expectEqual(@as(i32, -1), mecha_policy_hint_hash(p, p.len, 3, tpm, tpm.len, &out, out.len));
+    try t.expectEqual(@as(i32, -1), mecha_policy_hint_hash(null, 4, 0, tpm, tpm.len, &out, out.len));
+    try t.expectEqual(@as(i32, -1), mecha_policy_hint_hash(p, p.len, 0, null, 1, &out, out.len));
+    try t.expectEqual(@as(i32, -1), mecha_policy_hint_hash(p, p.len, 0, tpm, tpm.len, null, 64));
+    const nul_product = "mecha\x00validate";
+    try t.expectEqual(@as(i32, -1), mecha_policy_hint_hash(nul_product, nul_product.len, 0, "x", 1, &out, out.len));
 }

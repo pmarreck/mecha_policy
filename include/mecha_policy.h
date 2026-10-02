@@ -85,4 +85,22 @@ const char *mecha_policy_install_reason_name(uint8_t code);
  * never needs to leave the machine. */
 void mecha_policy_machine_hash(const char *product, const uint8_t *raw_id, size_t raw_len, char *out_65);
 
+/* Device-hint kinds (sigil contract section 15.1). */
+#define MECHA_POLICY_HINT_DISK 0
+#define MECHA_POLICY_HINT_MAC 1
+#define MECHA_POLICY_HINT_TPM 2
+
+/* Per-product device hint for server-side device counting: normalizes the
+ * raw observation (disk serial trimmed and lowercased; MAC reduced to 12 hex
+ * digits, universally administered unicast only; TPM EK bytes hex-encoded),
+ * then SHA-256 over "mecha-hint-v1" || product || 0x00 || kind || 0x00 ||
+ * normalized. Buffers are length-delimited: product and value may be any
+ * bytes (value may contain 0x00; product may not), and exactly 64 lowercase
+ * hex bytes are written to out with NO terminating NUL. Returns 64 on
+ * success; -1 invalid argument (unknown kind, NULL with nonzero length,
+ * empty or NUL-bearing product); -2 value rejected, so omit the hint; -3
+ * out_cap below 64. The hash is pseudonymous, not secret. */
+int32_t mecha_policy_hint_hash(const uint8_t *product, size_t product_len, uint8_t kind,
+	const uint8_t *value, size_t value_len, char *out, size_t out_cap);
+
 #endif

@@ -15,6 +15,7 @@
 #include "mecha_policy.h"
 
 #define EX_USAGE 64
+#define EX_DATAERR 65
 #define EX_NOINPUT 66
 #define EX_SOFTWARE 70
 
@@ -46,6 +47,7 @@ static void usage(FILE *out) {
 	    "       mecha-policy install --cert FILE --product ID --license-sha256 HEX\n"
 	    "         --machine HEX --now YYYY-MM-DD [--hwm YYYY-MM-DD]\n"
 	    "       mecha-policy machine-hash --product ID --raw-id-file FILE\n"
+	    "       mecha-policy hint-hash --product ID --kind disk|mac|tpm --value-file FILE\n"
 	    "       mecha-policy --help | --about\n");
 }
 
@@ -111,9 +113,47 @@ static int cmd_machine_hash(int argc, char *argv[]) {
 	return 0;
 }
 
+/* `hint-hash`: print the per-product device hint (contract section 15.1) for
+ * a raw observation read from a file or stdin. Exit 65 when the value is
+ * rejected (the app omits that hint), 64 on usage errors. */
+static int cmd_hint_hash(int argc, char *argv[]) {
+	const char *product = NULL, *kind_s = NULL, *path = NULL;
+	for (int i = 2; i < argc; i++) {
+		const char *a = argv[i];
+		if (i + 1 < argc) {
+			if (strcmp(a, "--product") == 0) { product = argv[++i]; continue; }
+			if (strcmp(a, "--kind") == 0) { kind_s = argv[++i]; continue; }
+			if (strcmp(a, "--value-file") == 0) { path = argv[++i]; continue; }
+		}
+		fprintf(stderr, "mecha-policy: unknown or incomplete argument: %s\n", a);
+		usage(stderr);
+		return EX_USAGE;
+	}
+	if (!product || !kind_s || !path) { usage(stderr); return EX_USAGE; }
+	uint8_t kind;
+	if (strcmp(kind_s, "disk") == 0) kind = MECHA_POLICY_HINT_DISK;
+	else if (strcmp(kind_s, "mac") == 0) kind = MECHA_POLICY_HINT_MAC;
+	else if (strcmp(kind_s, "tpm") == 0) kind = MECHA_POLICY_HINT_TPM;
+	else { fprintf(stderr, "mecha-policy: --kind must be disk, mac or tpm, not %s\n", kind_s); return EX_USAGE; }
+	FILE *in = (strcmp(path, "-") == 0 || strcmp(path, "@stdin") == 0) ? stdin : fopen(path, "rb");
+	if (!in) { fprintf(stderr, "mecha-policy: cannot open %s\n", path); return EX_NOINPUT; }
+	size_t len = 0;
+	unsigned char *raw = slurp(in, &len);
+	if (in != stdin) fclose(in);
+	if (!raw) { fprintf(stderr, "mecha-policy: read failed\n"); return EX_SOFTWARE; }
+	char out[64];
+	int32_t rc = mecha_policy_hint_hash((const uint8_t *)product, strlen(product), kind, raw, len, out, sizeof out);
+	free(raw);
+	if (rc == -2) { fprintf(stderr, "mecha-policy: %s value identifies no device; omit this hint\n", kind_s); return EX_DATAERR; }
+	if (rc != 64) { fprintf(stderr, "mecha-policy: invalid product\n"); return EX_USAGE; }
+	printf("%.64s\n", out);
+	return 0;
+}
+
 int main(int argc, char *argv[]) {
 	if (argc >= 2 && strcmp(argv[1], "install") == 0) return cmd_install(argc, argv);
 	if (argc >= 2 && strcmp(argv[1], "machine-hash") == 0) return cmd_machine_hash(argc, argv);
+	if (argc >= 2 && strcmp(argv[1], "hint-hash") == 0) return cmd_hint_hash(argc, argv);
 	const char *payload_path = NULL, *role_s = NULL, *product = NULL;
 	const char *now = NULL, *hwm = NULL, *operation = NULL;
 	long app_major = -1;
