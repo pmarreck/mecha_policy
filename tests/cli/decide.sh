@@ -47,27 +47,27 @@ printf 'not json' > "$TD/garbage.json"
 echo "mecha-policy CLI — binary: $BIN"
 
 expect 0 authorized "valid beta grant on its expiry day is authorized" \
-	decide --payload "$TD/beta.json" --role beta-license --product mecha-validate --app-major 1 --now 2026-10-17
+	decide --payload "$TD/beta.json" --role beta-license --product mecha-validate --app-major 1 --app-minor 0 --now 2026-10-17
 expect 1 expired "the day after expiry is refused as expired" \
-	decide --payload "$TD/beta.json" --role beta-license --product mecha-validate --app-major 1 --now 2026-10-18
+	decide --payload "$TD/beta.json" --role beta-license --product mecha-validate --app-major 1 --app-minor 0 --now 2026-10-18
 expect 1 class_key_mismatch "the leaked-beta-key forgery is refused at class binding" \
-	decide --payload "$TD/forged.json" --role beta-license --product mecha-validate --app-major 1 --now 2026-09-17
+	decide --payload "$TD/forged.json" --role beta-license --product mecha-validate --app-major 1 --app-minor 0 --now 2026-09-17
 expect 1 wrong_product "a validate grant refuses rotshield" \
-	decide --payload "$TD/beta.json" --role beta-license --product mecha-rotshield --app-major 1 --now 2026-09-17
+	decide --payload "$TD/beta.json" --role beta-license --product mecha-rotshield --app-major 1 --app-minor 0 --now 2026-09-17
 expect 1 malformed "garbage bytes are malformed, not a crash" \
-	decide --payload "$TD/garbage.json" --role beta-license --product mecha-validate --app-major 1 --now 2026-09-17
+	decide --payload "$TD/garbage.json" --role beta-license --product mecha-validate --app-major 1 --app-minor 0 --now 2026-09-17
 expect 1 clock_rollback "now behind the high-water mark is refused" \
-	decide --payload "$TD/beta.json" --role beta-license --product mecha-validate --app-major 1 --now 2026-09-16 --hwm 2026-09-17
+	decide --payload "$TD/beta.json" --role beta-license --product mecha-validate --app-major 1 --app-minor 0 --now 2026-09-16 --hwm 2026-09-17
 expect 64 "" "missing required arguments is a usage error" decide
 expect 64 "" "an invalid --now date is a usage error, not a verdict" \
-	decide --payload "$TD/beta.json" --role beta-license --product mecha-validate --app-major 1 --now nonsense
+	decide --payload "$TD/beta.json" --role beta-license --product mecha-validate --app-major 1 --app-minor 0 --now nonsense
 expect 66 "" "a missing payload file is a missing-input error" \
-	decide --payload "$TD/nope.json" --role beta-license --product mecha-validate --app-major 1 --now 2026-09-17
+	decide --payload "$TD/nope.json" --role beta-license --product mecha-validate --app-major 1 --app-minor 0 --now 2026-09-17
 expect 0 "" "--help exits zero" --help
 expect 0 "" "--about exits zero" --about
 
 # stdin form
-out="$("$BIN" decide --payload - --role beta-license --product mecha-validate --app-major 1 --now 2026-09-17 < "$TD/beta.json" 2>/dev/null)"
+out="$("$BIN" decide --payload - --role beta-license --product mecha-validate --app-major 1 --app-minor 0 --now 2026-09-17 < "$TD/beta.json" 2>/dev/null)"
 if [[ $? -eq 0 && "$out" == "authorized" ]]; then
 	pass "'-' reads the payload from stdin"
 else
@@ -77,7 +77,7 @@ fi
 # Path-with-spaces (CLI arg contract)
 mkdir -p "$TD/with space" && cp "$TD/beta.json" "$TD/with space/b.json"
 expect 0 authorized "payload paths with spaces work" \
-	decide --payload "$TD/with space/b.json" --role beta-license --product mecha-validate --app-major 1 --now 2026-09-17
+	decide --payload "$TD/with space/b.json" --role beta-license --product mecha-validate --app-major 1 --app-minor 0 --now 2026-09-17
 
 printf '\n%d passed, %d failed\n' "$PASS" "$FAIL"
 exit "$FAIL"

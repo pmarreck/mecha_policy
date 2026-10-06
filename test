@@ -7,6 +7,7 @@ FAILS=0
 $NIXDEV zig build test -Doptimize=ReleaseSafe || FAILS=$((FAILS + 1))
 $NIXDEV zig build || FAILS=$((FAILS + 1))
 bash tests/cli/decide.sh || FAILS=$((FAILS + 1))
+bash tests/cli/decide_v2.sh || FAILS=$((FAILS + 1))
 bash tests/cli/install.sh || FAILS=$((FAILS + 1))
 bash tests/cli/hints.sh || FAILS=$((FAILS + 1))
 echo ""

@@ -2,12 +2,13 @@
  * decision itself is the same mecha_policy_decide every app gate calls.
  *
  *   mecha-policy decide --payload FILE --role beta-license|paid-license \
- *     --product ID --app-major N --now YYYY-MM-DD [--hwm YYYY-MM-DD] \
+ *     --product ID --app-major N --app-minor N --now YYYY-MM-DD [--hwm YYYY-MM-DD] \
  *     [--operation OP]
  *
  * Prints the reason name to stdout. Exit: 0 authorized, 1 refused,
  * 64 usage, 66 missing input, 70 internal. Later arguments override
  * earlier ones; '-' or '@stdin' reads the payload from stdin. */
+#include <errno.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -42,7 +43,7 @@ static unsigned char *slurp(FILE *f, size_t *len_out) {
 static void usage(FILE *out) {
 	fprintf(out,
 	    "Usage: mecha-policy decide --payload FILE --role beta-license|paid-license\n"
-	    "         --product ID --app-major N --now YYYY-MM-DD\n"
+	    "         --product ID --app-major N --app-minor N --now YYYY-MM-DD\n"
 	    "         [--hwm YYYY-MM-DD] [--operation OP]\n"
 	    "       mecha-policy install --cert FILE --product ID --license-sha256 HEX\n"
 	    "         --machine HEX --now YYYY-MM-DD [--hwm YYYY-MM-DD]\n"
@@ -150,13 +151,24 @@ static int cmd_hint_hash(int argc, char *argv[]) {
 	return 0;
 }
 
+/* A non-negative decimal that fits uint32_t, or -1: a sign, junk or overflow
+ * is a usage error, never silently 0. */
+static long parse_count(const char *s) {
+	if (!s || !*s) return -1;
+	for (const char *p = s; *p; p++) if (*p < '0' || *p > '9') return -1;
+	errno = 0;
+	unsigned long v = strtoul(s, NULL, 10);
+	if (errno != 0 || v > 4294967295UL) return -1;
+	return (long)v;
+}
+
 int main(int argc, char *argv[]) {
 	if (argc >= 2 && strcmp(argv[1], "install") == 0) return cmd_install(argc, argv);
 	if (argc >= 2 && strcmp(argv[1], "machine-hash") == 0) return cmd_machine_hash(argc, argv);
 	if (argc >= 2 && strcmp(argv[1], "hint-hash") == 0) return cmd_hint_hash(argc, argv);
 	const char *payload_path = NULL, *role_s = NULL, *product = NULL;
 	const char *now = NULL, *hwm = NULL, *operation = NULL;
-	long app_major = -1;
+	long app_major = -1, app_minor = -1;
 	int saw_decide = 0;
 
 	for (int i = 1; i < argc; i++) {
@@ -176,6 +188,7 @@ int main(int argc, char *argv[]) {
 			if (strcmp(a, "--role") == 0) { role_s = argv[++i]; continue; }
 			if (strcmp(a, "--product") == 0) { product = argv[++i]; continue; }
 			if (strcmp(a, "--app-major") == 0) { app_major = strtol(argv[++i], NULL, 10); continue; }
+			if (strcmp(a, "--app-minor") == 0) { app_minor = parse_count(argv[++i]); continue; }
 			if (strcmp(a, "--now") == 0) { now = argv[++i]; continue; }
 			if (strcmp(a, "--hwm") == 0) { hwm = argv[++i]; continue; }
 			if (strcmp(a, "--operation") == 0) { operation = argv[++i]; continue; }
@@ -185,7 +198,7 @@ int main(int argc, char *argv[]) {
 		return EX_USAGE;
 	}
 
-	if (!saw_decide || !payload_path || !role_s || !product || app_major < 0 || !now) {
+	if (!saw_decide || !payload_path || !role_s || !product || app_major < 0 || app_minor < 0 || !now) {
 		usage(stderr);
 		return EX_USAGE;
 	}
@@ -217,7 +230,7 @@ int main(int argc, char *argv[]) {
 	}
 
 	int32_t rc = mecha_policy_decide(payload, len, role, product,
-	    (uint32_t)app_major, now, hwm, operation);
+	    (uint32_t)app_major, (uint32_t)app_minor, now, hwm, operation);
 	free(payload);
 
 	if (rc < 0) {

@@ -40,6 +40,7 @@ int32_t mecha_policy_decide(
 	uint8_t role,
 	const char *product,
 	uint32_t app_major,
+	uint32_t app_minor,
 	const char *now_utc_date,
 	const char *clock_high_water,
 	const char *operation);
@@ -47,7 +48,10 @@ int32_t mecha_policy_decide(
 /* Stable name for a decision code, for status surfaces and logs. */
 const char *mecha_policy_reason_name(uint8_t code);
 
-/* The ABI contract version this header describes; assert it at startup. */
+/* The ABI contract version this header describes; assert it at startup.
+ * ABI 2 (sigil contract section 14, payload v2): decide takes app_minor;
+ * a v2 grant authorizes only (app_major, app_minor) <= (max_major,
+ * max_minor), and a v1 grant ignores app_minor. */
 uint32_t mecha_policy_abi_version(void);
 
 const char *mecha_policy_version(void);

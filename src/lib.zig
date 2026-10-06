@@ -68,6 +68,9 @@ pub const Request = struct {
     /// The asking application's product identifier, e.g. "mecha-validate".
     product: []const u8,
     app_major: u32,
+    /// The asking build's minor version. Required, no default: a forgotten
+    /// minor would silently pass the payload v2 ceiling. v1 grants ignore it.
+    app_minor: u32,
     /// Current UTC date, YYYY-MM-DD.
     now_utc_date: []const u8,
     /// Latest date this install has ever seen (opaque high-water store,
@@ -97,6 +100,34 @@ const PayloadV1 = struct {
     v: []const u8,
 };
 
+/// The typed shape of a v2 versioned paid grant (contract section 14): every
+/// v1 field plus `max_minor`, with `expiry` mandatory. Same strict parse.
+const PayloadV2 = struct {
+    customer_email: []const u8,
+    customer_name_canonical: []const u8,
+    expiry: []const u8,
+    features: []const u8,
+    max_major: []const u8,
+    max_minor: []const u8,
+    offline_days: []const u8,
+    payment_provider: []const u8,
+    payment_ref: []const u8,
+    product: []const u8,
+    purchase_date: []const u8,
+    v: []const u8,
+};
+
+/// The fields evaluation needs, common to v1 and v2 after schema checks.
+const Grant = struct {
+    class: GrantClass,
+    expiry: ?[]const u8,
+    features: []const u8,
+    max_major: u32,
+    /// null for v1: a v1 grant is major-only.
+    max_minor: ?u32,
+    product: []const u8,
+};
+
 /// Evaluate one verified license payload against one admission request.
 /// Sequencing (contract rev 1.1): schema -> class/key binding -> product ->
 /// version ceiling -> clock rollback -> expiry -> operation. Distinct from
@@ -104,37 +135,27 @@ const PayloadV1 = struct {
 pub fn decide(allocator: std.mem.Allocator, req: Request) Error!Decision {
     if (!isValidDate(req.now_utc_date)) return Error.InvalidNow;
 
-    const parsed = std.json.parseFromSlice(PayloadV1, allocator, req.payload, .{
-        .duplicate_field_behavior = .@"error",
-    }) catch |e| switch (e) {
-        error.OutOfMemory => return Error.OutOfMemory,
-        else => return .malformed,
-    };
-    defer parsed.deinit();
-    const p = parsed.value;
-
-    // Schema, beyond what the typed parse enforced.
-    if (!std.mem.eql(u8, p.v, "1")) return .malformed;
-    const class = classOf(p.payment_provider) orelse return .malformed;
-    if (!isValidDate(p.purchase_date)) return .malformed;
-    if (p.expiry) |x| {
-        if (!isValidDate(x)) return .malformed;
-    }
-    // A beta grant without a dated expiry is schema-invalid by contract.
-    if (class == .beta and p.expiry == null) return .malformed;
-    const max_major = std.fmt.parseInt(u32, p.max_major, 10) catch return .malformed;
+    var arena_state = std.heap.ArenaAllocator.init(allocator);
+    defer arena_state.deinit();
+    const g = (try parseGrant(arena_state.allocator(), req.payload)) orelse return .malformed;
 
     // Key-to-grant-class binding: the role that VERIFIED constrains what the
     // payload may claim. This is the check that caps a leaked key's blast
     // radius; it must come before any "is it otherwise fine" reasoning.
     const class_ok = switch (req.verified_role) {
-        .beta_license => class == .beta,
-        .paid_license => class == .paddle or class == .comp,
+        .beta_license => g.class == .beta,
+        .paid_license => g.class == .paddle or g.class == .comp,
     };
     if (!class_ok) return .class_key_mismatch;
 
-    if (!std.mem.eql(u8, p.product, req.product)) return .wrong_product;
-    if (req.app_major > max_major) return .version_ceiling;
+    if (!std.mem.eql(u8, g.product, req.product)) return .wrong_product;
+    // Version ceiling (contract section 14, Peter 2026-10-06): lexicographic
+    // (app_major, app_minor) <= (max_major, max_minor); a v1 grant has no
+    // minor ceiling.
+    if (req.app_major > g.max_major) return .version_ceiling;
+    if (g.max_minor) |mm| {
+        if (req.app_major == g.max_major and req.app_minor > mm) return .version_ceiling;
+    }
 
     // A stored high-water mark that is itself corrupt is app-state damage,
     // not evidence of rollback; ignore it rather than brick the install.
@@ -143,7 +164,7 @@ pub fn decide(allocator: std.mem.Allocator, req: Request) Error!Decision {
             return .clock_rollback;
     }
 
-    if (p.expiry) |x| {
+    if (g.expiry) |x| {
         // Day-inclusive: authorized through the expiry date itself, all UTC.
         if (std.mem.order(u8, req.now_utc_date, x) == .gt) return .expired;
     }
@@ -151,12 +172,66 @@ pub fn decide(allocator: std.mem.Allocator, req: Request) Error!Decision {
     // features "full" covers every operation; a narrower grant covers only
     // its named operation class. null = the app's default protected op,
     // covered by any authorized grant.
-    if (!std.mem.eql(u8, p.features, "full")) {
+    if (!std.mem.eql(u8, g.features, "full")) {
         if (req.operation) |op| {
-            if (!std.mem.eql(u8, op, p.features)) return .operation_not_granted;
+            if (!std.mem.eql(u8, op, g.features)) return .operation_not_granted;
         }
     }
     return .authorized;
+}
+
+/// Schema gate for both payload versions: peek `v`, then a strict typed
+/// parse of exactly that version (unknown, duplicate and mistyped fields all
+/// fail). Returns null for any schema violation; the caller reports
+/// `malformed`. v2 is the paid versioned grant: mandatory expiry, canonical
+/// decimal max_major and max_minor, never a beta or demo class.
+fn parseGrant(arena: std.mem.Allocator, payload: []const u8) Error!?Grant {
+    const opts: std.json.ParseOptions = .{ .duplicate_field_behavior = .@"error" };
+    const Peek = struct { v: []const u8 };
+    const peek = std.json.parseFromSliceLeaky(Peek, arena, payload, .{
+        .duplicate_field_behavior = .@"error",
+        .ignore_unknown_fields = true,
+    }) catch |e| switch (e) {
+        error.OutOfMemory => return Error.OutOfMemory,
+        else => return null,
+    };
+    if (std.mem.eql(u8, peek.v, "1")) {
+        const p = std.json.parseFromSliceLeaky(PayloadV1, arena, payload, opts) catch |e| switch (e) {
+            error.OutOfMemory => return Error.OutOfMemory,
+            else => return null,
+        };
+        const class = classOf(p.payment_provider) orelse return null;
+        if (!isValidDate(p.purchase_date)) return null;
+        if (p.expiry) |x| {
+            if (!isValidDate(x)) return null;
+        }
+        // A beta grant without a dated expiry is schema-invalid by contract.
+        if (class == .beta and p.expiry == null) return null;
+        const max_major = std.fmt.parseInt(u32, p.max_major, 10) catch return null;
+        return .{ .class = class, .expiry = p.expiry, .features = p.features, .max_major = max_major, .max_minor = null, .product = p.product };
+    }
+    if (std.mem.eql(u8, peek.v, "2")) {
+        const p = std.json.parseFromSliceLeaky(PayloadV2, arena, payload, opts) catch |e| switch (e) {
+            error.OutOfMemory => return Error.OutOfMemory,
+            else => return null,
+        };
+        const class = classOf(p.payment_provider) orelse return null;
+        if (class != .paddle and class != .comp) return null;
+        if (!isValidDate(p.purchase_date) or !isValidDate(p.expiry)) return null;
+        const max_major = canonicalU32(p.max_major) orelse return null;
+        const max_minor = canonicalU32(p.max_minor) orelse return null;
+        return .{ .class = class, .expiry = p.expiry, .features = p.features, .max_major = max_major, .max_minor = max_minor, .product = p.product };
+    }
+    return null;
+}
+
+/// A base-10 u32 with no sign, no leading zeros ("0" itself allowed) and no
+/// overflow; anything else is null. Used for the v2 version fields.
+fn canonicalU32(s: []const u8) ?u32 {
+    if (s.len == 0) return null;
+    if (s.len > 1 and s[0] == '0') return null;
+    for (s) |c| if (c < '0' or c > '9') return null;
+    return std.fmt.parseInt(u32, s, 10) catch null;
 }
 
 const GrantClass = enum { beta, paddle, comp, demo };
@@ -203,6 +278,7 @@ export fn mecha_policy_decide(
     role: u8,
     product: [*:0]const u8,
     app_major: u32,
+    app_minor: u32,
     now_utc_date: [*:0]const u8,
     clock_high_water: ?[*:0]const u8,
     operation: ?[*:0]const u8,
@@ -217,6 +293,7 @@ export fn mecha_policy_decide(
         .verified_role = role_e,
         .product = std.mem.span(product),
         .app_major = app_major,
+        .app_minor = app_minor,
         .now_utc_date = std.mem.span(now_utc_date),
         .clock_high_water = if (clock_high_water) |h| std.mem.span(h) else null,
         .operation = if (operation) |o| std.mem.span(o) else null,
@@ -240,11 +317,11 @@ export fn mecha_policy_reason_name(code: u8) [*:0]const u8 {
 /// validate's freshness gate and adapters assert mechanically instead of
 /// remembering (validate's counter, adopted 2026-09-17).
 export fn mecha_policy_abi_version() u32 {
-    return 1;
+    return 2;
 }
 
 export fn mecha_policy_version() [*:0]const u8 {
-    return "0.1.0";
+    return "0.2.0";
 }
 
 // ── Installation certificates (contract section 15) ─────────────────
@@ -598,6 +675,7 @@ test "manifest evals: every expected decision from mecha-license-vectors/1" {
             .verified_role = e.role,
             .product = e.product,
             .app_major = e.app_major,
+            .app_minor = 0,
             .now_utc_date = e.now,
         });
         if (got != e.expect) {
@@ -613,6 +691,7 @@ test "class binding is symmetric: beta-class payload under the paid role is refu
         .verified_role = .paid_license,
         .product = "mecha-validate",
         .app_major = 1,
+        .app_minor = 0,
         .now_utc_date = "2026-09-17",
     }));
 }
@@ -652,6 +731,7 @@ test "malformed corpus: adversarial bytes are malformed, never a crash or a gran
             .verified_role = .beta_license,
             .product = "mecha-validate",
             .app_major = 1,
+            .app_minor = 0,
             .now_utc_date = "2026-09-17",
         });
         if (got != .malformed) {
@@ -667,6 +747,7 @@ test "clock rollback: now behind the high-water mark is refused; at or ahead is 
         .verified_role = .beta_license,
         .product = "mecha-validate",
         .app_major = 1,
+        .app_minor = 0,
         .now_utc_date = "2026-09-17",
         .clock_high_water = "2026-09-17",
     });
@@ -676,6 +757,7 @@ test "clock rollback: now behind the high-water mark is refused; at or ahead is 
         .verified_role = .beta_license,
         .product = "mecha-validate",
         .app_major = 1,
+        .app_minor = 0,
         .now_utc_date = "2026-09-16",
         .clock_high_water = "2026-09-17",
     });
@@ -688,6 +770,7 @@ test "operation gating: features full covers any operation; ungrantable op refus
         .verified_role = .beta_license,
         .product = "mecha-validate",
         .app_major = 1,
+        .app_minor = 0,
         .now_utc_date = "2026-09-17",
         .operation = "scan",
     }));
@@ -699,6 +782,7 @@ test "invalid injected now is a loud error, not a decision" {
         .verified_role = .beta_license,
         .product = "mecha-validate",
         .app_major = 1,
+        .app_minor = 0,
         .now_utc_date = "not-a-date",
     }));
 }
@@ -709,8 +793,8 @@ test "high-water store format: max of stored and now" {
     try t.expectEqualStrings("2026-09-18", nextHighWater("2026-09-18", "2026-09-17"));
 }
 
-test "abi version is 1 until a breaking change bumps it" {
-    try t.expectEqual(@as(u32, 1), mecha_policy_abi_version());
+test "abi version is 2 since payload v2 added app_minor to decide" {
+    try t.expectEqual(@as(u32, 2), mecha_policy_abi_version());
 }
 
 // ── Installation certificates (contract section 15) ─────────────────
@@ -889,4 +973,99 @@ test "hint hash C export: length-delimited in and out, bounded, no terminator" {
     try t.expectEqual(@as(i32, -1), mecha_policy_hint_hash(p, p.len, 0, tpm, tpm.len, null, 64));
     const nul_product = "mecha\x00validate";
     try t.expectEqual(@as(i32, -1), mecha_policy_hint_hash(nul_product, nul_product.len, 0, "x", 1, &out, out.len));
+}
+
+// ── Payload v2 (sigil contract section 14) ───────────────────────────
+// Payloads copied verbatim from sigil examples/license_vectors_v2
+// (mecha-license-vectors/2, sigil 08daf9b + v2_bad_expiry); expects are that manifest's
+// hand-written answers.
+const pv2_valid =
+    \\{"customer_email":"customer@example.com","customer_name_canonical":"paying customer","expiry":"2027-10-17","features":"full","max_major":"1","max_minor":"3","offline_days":"365","payment_provider":"paddle","payment_ref":"txn_v2_0001","product":"mecha-validate","purchase_date":"2026-09-17","v":"2"}
+;
+const pv2_leap =
+    \\{"customer_email":"customer@example.com","customer_name_canonical":"paying customer","expiry":"2029-02-28","features":"full","max_major":"1","max_minor":"0","offline_days":"365","payment_provider":"paddle","payment_ref":"txn_v2_0002","product":"mecha-validate","purchase_date":"2026-09-17","v":"2"}
+;
+const pv2_missing_expiry =
+    \\{"customer_email":"customer@example.com","customer_name_canonical":"paying customer","features":"full","max_major":"1","max_minor":"3","offline_days":"365","payment_provider":"paddle","payment_ref":"txn_v2_0003","product":"mecha-validate","purchase_date":"2026-09-17","v":"2"}
+;
+const pv2_missing_max_minor =
+    \\{"customer_email":"customer@example.com","customer_name_canonical":"paying customer","expiry":"2027-10-17","features":"full","max_major":"1","offline_days":"365","payment_provider":"paddle","payment_ref":"txn_v2_0004","product":"mecha-validate","purchase_date":"2026-09-17","v":"2"}
+;
+const pv2_max_minor_leading_zero =
+    \\{"customer_email":"customer@example.com","customer_name_canonical":"paying customer","expiry":"2027-10-17","features":"full","max_major":"1","max_minor":"03","offline_days":"365","payment_provider":"paddle","payment_ref":"txn_v2_0005","product":"mecha-validate","purchase_date":"2026-09-17","v":"2"}
+;
+const pv2_max_minor_plus =
+    \\{"customer_email":"customer@example.com","customer_name_canonical":"paying customer","expiry":"2027-10-17","features":"full","max_major":"1","max_minor":"+3","offline_days":"365","payment_provider":"paddle","payment_ref":"txn_v2_0006","product":"mecha-validate","purchase_date":"2026-09-17","v":"2"}
+;
+const pv2_beta_class =
+    \\{"customer_email":"customer@example.com","customer_name_canonical":"paying customer","expiry":"2027-10-17","features":"full","max_major":"1","max_minor":"3","offline_days":"365","payment_provider":"beta","payment_ref":"beta_v2_0007","product":"mecha-validate","purchase_date":"2026-09-17","v":"2"}
+;
+const pv2_unknown_field =
+    \\{"customer_email":"customer@example.com","customer_name_canonical":"paying customer","expiry":"2027-10-17","features":"full","max_major":"1","max_minor":"3","offline_days":"365","payment_provider":"paddle","payment_ref":"txn_v2_0008","product":"mecha-validate","purchase_date":"2026-09-17","seats":"5","v":"2"}
+;
+const pv2_v1_with_max_minor =
+    \\{"customer_email":"customer@example.com","customer_name_canonical":"paying customer","expiry":"2027-10-17","features":"full","max_major":"1","max_minor":"3","offline_days":"365","payment_provider":"paddle","payment_ref":"txn_v2_0009","product":"mecha-validate","purchase_date":"2026-09-17","v":"1"}
+;
+const pv2_bad_expiry =
+    \\{"customer_email":"customer@example.com","customer_name_canonical":"paying customer","expiry":"2027-13-01","features":"full","max_major":"1","max_minor":"3","offline_days":"365","payment_provider":"paddle","payment_ref":"txn_v2_0010","product":"mecha-validate","purchase_date":"2026-09-17","v":"2"}
+;
+
+const EvalV2 = struct {
+    payload: []const u8,
+    role: Role = .paid_license,
+    product: []const u8 = "mecha-validate",
+    major: u32 = 1,
+    minor: u32 = 0,
+    now: []const u8 = "2026-10-17",
+    expect: Decision,
+};
+
+const manifest_v2_evals = [_]EvalV2{
+    .{ .payload = pv2_valid, .minor = 0, .expect = .authorized },
+    .{ .payload = pv2_valid, .minor = 2, .expect = .authorized },
+    .{ .payload = pv2_valid, .minor = 3, .expect = .authorized },
+    .{ .payload = pv2_valid, .minor = 4, .expect = .version_ceiling },
+    .{ .payload = pv2_valid, .major = 2, .minor = 0, .expect = .version_ceiling },
+    .{ .payload = pv2_valid, .major = 0, .minor = 99, .expect = .authorized },
+    .{ .payload = pv2_valid, .minor = 3, .now = "2027-10-17", .expect = .authorized },
+    .{ .payload = pv2_valid, .minor = 3, .now = "2027-10-18", .expect = .expired },
+    .{ .payload = pv2_valid, .minor = 3, .product = "mecha-rotshield", .expect = .wrong_product },
+    .{ .payload = pv2_leap, .now = "2029-02-28", .expect = .authorized },
+    .{ .payload = pv2_leap, .now = "2029-03-01", .expect = .expired },
+    .{ .payload = pv2_leap, .minor = 1, .now = "2029-02-28", .expect = .version_ceiling },
+    .{ .payload = pv2_missing_expiry, .expect = .malformed },
+    .{ .payload = pv2_missing_max_minor, .expect = .malformed },
+    .{ .payload = pv2_max_minor_leading_zero, .expect = .malformed },
+    .{ .payload = pv2_max_minor_plus, .expect = .malformed },
+    .{ .payload = pv2_beta_class, .role = .beta_license, .expect = .malformed },
+    .{ .payload = pv2_unknown_field, .expect = .malformed },
+    .{ .payload = pv2_v1_with_max_minor, .expect = .malformed },
+    .{ .payload = pv2_bad_expiry, .expect = .malformed },
+    .{ .payload = pv2_valid, .role = .beta_license, .expect = .class_key_mismatch },
+    .{ .payload = p_beta_valid, .role = .beta_license, .minor = 99, .expect = .authorized },
+    .{ .payload = p_beta_valid, .role = .beta_license, .major = 2, .expect = .version_ceiling },
+    .{ .payload = p_paid_valid, .minor = 99, .expect = .authorized },
+};
+
+test "manifest evals: every expected decision from mecha-license-vectors/2" {
+    for (manifest_v2_evals, 0..) |e, i| {
+        const got = try decide(t.allocator, .{
+            .payload = e.payload,
+            .verified_role = e.role,
+            .product = e.product,
+            .app_major = e.major,
+            .app_minor = e.minor,
+            .now_utc_date = e.now,
+        });
+        if (got != e.expect) {
+            std.debug.print("v2 eval[{d}]: expected {s}, got {s}\n", .{ i, e.expect.name(), got.name() });
+            return error.TestExpectedEqual;
+        }
+    }
+}
+
+test "C export decide carries app_minor (ABI 2)" {
+    const p = pv2_valid;
+    try t.expectEqual(@as(i32, @intFromEnum(Decision.authorized)), mecha_policy_decide(p.ptr, p.len, 1, "mecha-validate", 1, 3, "2026-10-17", null, null));
+    try t.expectEqual(@as(i32, @intFromEnum(Decision.version_ceiling)), mecha_policy_decide(p.ptr, p.len, 1, "mecha-validate", 1, 4, "2026-10-17", null, null));
 }
