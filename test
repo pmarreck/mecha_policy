@@ -10,6 +10,7 @@ bash tests/cli/decide.sh || FAILS=$((FAILS + 1))
 bash tests/cli/decide_v2.sh || FAILS=$((FAILS + 1))
 bash tests/cli/install.sh || FAILS=$((FAILS + 1))
 bash tests/cli/hints.sh || FAILS=$((FAILS + 1))
+bash tests/cli/calendar.sh || FAILS=$((FAILS + 1))
 echo ""
 if [[ $FAILS -eq 0 ]]; then echo "ALL PASS"; else echo "$FAILS suite(s) FAILED"; fi
 exit "$FAILS"

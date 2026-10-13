@@ -16,6 +16,14 @@
       sigil's manifest.json when the sibling checkout exists (drift guard)
 
 ## Completed
+- [x] Calendar validity (0.2.1, ABI 2 unchanged): isValidDate accepted
+      impossible dates such as 2026-02-30 for the injected now and for signed
+      purchase/expiry/issued fields; it now uses proleptic Gregorian month
+      lengths. Unit set (February in common, leap and century years, 30-day
+      months, boundaries; signed v1, v2 and certificate dates are malformed)
+      plus tests/cli/calendar.sh, a 1,008-date sweep checked against GNU
+      date. Found by RotShield's independent consumer control. 3 mutants
+      killed. — 2026-10-13 13:00 EDT
 - [x] Scaffold + core decide() TDD'd red->green against the full
       mecha-license-vectors/1 manifest (21 evals), 16-case malformed corpus,
       rollback, binding symmetry, high-water format; C FFI + mecha-policy

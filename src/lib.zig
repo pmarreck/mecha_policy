@@ -261,9 +261,22 @@ fn isValidDate(s: []const u8) bool {
             if (c != '-') return false;
         } else if (c < '0' or c > '9') return false;
     }
+    const year = @as(u16, s[0] - '0') * 1000 + @as(u16, s[1] - '0') * 100 + @as(u16, s[2] - '0') * 10 + (s[3] - '0');
     const month = (s[5] - '0') * 10 + (s[6] - '0');
     const day = (s[8] - '0') * 10 + (s[9] - '0');
-    return month >= 1 and month <= 12 and day >= 1 and day <= 31;
+    if (month < 1 or month > 12 or day < 1) return false;
+    return day <= daysInMonth(year, month);
+}
+
+/// Days in a month of the proleptic Gregorian calendar: 30-day months,
+/// February 29 only in leap years (divisible by 4, except centuries not
+/// divisible by 400).
+fn daysInMonth(year: u16, month: u8) u8 {
+    return switch (month) {
+        4, 6, 9, 11 => 30,
+        2 => if (year % 4 == 0 and (year % 100 != 0 or year % 400 == 0)) 29 else 28,
+        else => 31,
+    };
 }
 
 // ── C FFI ───────────────────────────────────────────────────────────
@@ -321,7 +334,7 @@ export fn mecha_policy_abi_version() u32 {
 }
 
 export fn mecha_policy_version() [*:0]const u8 {
-    return "0.2.0";
+    return "0.2.1";
 }
 
 // ── Installation certificates (contract section 15) ─────────────────
@@ -1068,4 +1081,61 @@ test "C export decide carries app_minor (ABI 2)" {
     const p = pv2_valid;
     try t.expectEqual(@as(i32, @intFromEnum(Decision.authorized)), mecha_policy_decide(p.ptr, p.len, 1, "mecha-validate", 1, 3, "2026-10-17", null, null));
     try t.expectEqual(@as(i32, @intFromEnum(Decision.version_ceiling)), mecha_policy_decide(p.ptr, p.len, 1, "mecha-validate", 1, 4, "2026-10-17", null, null));
+}
+
+test "calendar: a date is valid only if it exists in the proleptic Gregorian calendar" {
+    // Classifier over a set: February in common, leap, century-common and
+    // century-leap years; 30-day months; month and year boundaries.
+    const valid = [_][]const u8{
+        "2026-02-28", "2024-02-29", "2000-02-29", "2400-02-29", "1900-02-28", "2100-02-28",
+        "2026-04-30", "2026-06-30", "2026-09-30", "2026-11-30", "2026-01-31", "2026-03-31",
+        "2026-05-31", "2026-07-31", "2026-08-31", "2026-10-31", "2026-12-31", "2027-01-01",
+    };
+    const invalid = [_][]const u8{
+        "2026-02-29", "2026-02-30", "2026-02-31", "2024-02-30", "1900-02-29", "2100-02-29",
+        "2026-04-31", "2026-06-31", "2026-09-31", "2026-11-31", "2026-12-32", "2026-13-01",
+        "2026-00-10", "2026-01-00", "2026-9-17",  "2026-09-17T", "2026/09/17", "",
+    };
+    for (valid) |d| t.expect(isValidDate(d)) catch |e| {
+        std.debug.print("expected valid: {s}\n", .{d});
+        return e;
+    };
+    for (invalid) |d| t.expect(!isValidDate(d)) catch |e| {
+        std.debug.print("expected invalid: {s}\n", .{d});
+        return e;
+    };
+    // Every public entry point refuses an impossible injected now.
+    try t.expectError(Error.InvalidNow, decide(t.allocator, .{ .payload = p_beta_valid, .verified_role = .beta_license, .product = "mecha-validate", .app_major = 1, .app_minor = 0, .now_utc_date = "2026-02-30" }));
+    try t.expectError(Error.InvalidNow, decideInstall(t.allocator, .{ .cert_payload = ic_valid, .product = "mecha-validate", .license_sha256 = ic_lic, .machine = ic_machine_a, .now_utc_date = "2026-02-30" }));
+}
+
+fn withDate(payload: []const u8, field_value: []const u8, impossible: []const u8) ![]u8 {
+    const out = try std.mem.replaceOwned(u8, t.allocator, payload, field_value, impossible);
+    if (std.mem.eql(u8, out, payload)) return error.FixtureFieldNotFound;
+    return out;
+}
+
+test "calendar: a signed payload naming an impossible date is malformed" {
+    const grants = [_]struct { p: []const u8, field: []const u8, role: Role }{
+        .{ .p = p_beta_valid, .field = "\"expiry\":\"2026-10-17\"", .role = .beta_license },
+        .{ .p = p_beta_valid, .field = "\"purchase_date\":\"2026-09-17\"", .role = .beta_license },
+        .{ .p = pv2_valid, .field = "\"expiry\":\"2027-10-17\"", .role = .paid_license },
+        .{ .p = pv2_valid, .field = "\"purchase_date\":\"2026-09-17\"", .role = .paid_license },
+    };
+    for (grants) |g| {
+        const name = g.field[1 .. std.mem.indexOfScalarPos(u8, g.field, 1, '"').?];
+        const bad_field = try std.fmt.allocPrint(t.allocator, "\"{s}\":\"2026-02-30\"", .{name});
+        defer t.allocator.free(bad_field);
+        const bad = try withDate(g.p, g.field, bad_field);
+        defer t.allocator.free(bad);
+        try t.expectEqual(Decision.malformed, try decide(t.allocator, .{ .payload = bad, .verified_role = g.role, .product = "mecha-validate", .app_major = 1, .app_minor = 0, .now_utc_date = "2026-09-20" }));
+    }
+    for ([_][]const u8{ "\"issued\":\"2026-09-17\"", "\"expiry\":\"2026-10-17\"" }) |field| {
+        const name = field[1 .. std.mem.indexOfScalarPos(u8, field, 1, '"').?];
+        const bad_field = try std.fmt.allocPrint(t.allocator, "\"{s}\":\"2026-09-31\"", .{name});
+        defer t.allocator.free(bad_field);
+        const bad = try withDate(ic_valid, field, bad_field);
+        defer t.allocator.free(bad);
+        try t.expectEqual(InstallDecision.malformed, try decideInstall(t.allocator, .{ .cert_payload = bad, .product = "mecha-validate", .license_sha256 = ic_lic, .machine = ic_machine_a, .now_utc_date = "2026-09-20" }));
+    }
 }
