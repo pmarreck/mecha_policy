@@ -130,8 +130,9 @@ const Grant = struct {
 
 /// Evaluate one verified license payload against one admission request.
 /// Sequencing (contract rev 1.1): schema -> class/key binding -> product ->
-/// version ceiling -> clock rollback -> expiry -> operation. Distinct from
-/// both crypto failures (upstream) and file corruption (elsewhere entirely).
+/// version ceiling -> clock rollback (dated grants only) -> expiry ->
+/// operation. Distinct from both crypto failures (upstream) and file
+/// corruption (elsewhere entirely).
 pub fn decide(allocator: std.mem.Allocator, req: Request) Error!Decision {
     if (!isValidDate(req.now_utc_date)) return Error.InvalidNow;
 
@@ -157,11 +158,16 @@ pub fn decide(allocator: std.mem.Allocator, req: Request) Error!Decision {
         if (req.app_major == g.max_major and req.app_minor > mm) return .version_ceiling;
     }
 
-    // A stored high-water mark that is itself corrupt is app-state damage,
-    // not evidence of rollback; ignore it rather than brick the install.
-    if (req.clock_high_water) |hwm| {
-        if (isValidDate(hwm) and std.mem.order(u8, req.now_utc_date, hwm) == .lt)
-            return .clock_rollback;
+    // The mark guards an expiry: a clock set back can only extend a grant
+    // that ends. A grant with no expiry has nothing to extend, so its mark
+    // is not judged (sigil contract section 9, 2026-11-11). A stored mark
+    // that is itself corrupt is app-state damage, not evidence of rollback;
+    // ignore it rather than brick the install.
+    if (g.expiry != null) {
+        if (req.clock_high_water) |hwm| {
+            if (isValidDate(hwm) and std.mem.order(u8, req.now_utc_date, hwm) == .lt)
+                return .clock_rollback;
+        }
     }
 
     if (g.expiry) |x| {
@@ -244,9 +250,10 @@ fn classOf(provider: []const u8) ?GrantClass {
     return null;
 }
 
-/// The opaque clock high-water store format every app persists identically
-/// (contract rev 1.1): exactly the 10 bytes of the YYYY-MM-DD date, nothing
-/// else. Returns the value to persist after this evaluation.
+/// The clock high-water mark every app persists identically (contract rev
+/// 1.1, clarified 2026-11-11): exactly the 10 bytes of the YYYY-MM-DD date.
+/// How an app stores and protects it on disk is its own. Returns the value
+/// to persist after this evaluation.
 pub fn nextHighWater(now_utc_date: []const u8, stored: ?[]const u8) []const u8 {
     if (stored) |s| {
         if (std.mem.order(u8, s, now_utc_date) == .gt) return s;
@@ -334,7 +341,7 @@ export fn mecha_policy_abi_version() u32 {
 }
 
 export fn mecha_policy_version() [*:0]const u8 {
-    return "0.2.1";
+    return "0.3.0";
 }
 
 // ── Installation certificates (contract section 15) ─────────────────
@@ -777,6 +784,31 @@ test "clock rollback: now behind the high-water mark is refused; at or ahead is 
     try t.expectEqual(Decision.clock_rollback, behind);
 }
 
+test "clock rollback: the mark is judged only for a grant with an expiry" {
+    // paid_valid has no expiry: a clock set back extends nothing.
+    const undated_behind = try decide(t.allocator, .{
+        .payload = p_paid_valid,
+        .verified_role = .paid_license,
+        .product = "mecha-validate",
+        .app_major = 1,
+        .app_minor = 0,
+        .now_utc_date = "2026-09-17",
+        .clock_high_water = "2026-09-20",
+    });
+    try t.expectEqual(Decision.authorized, undated_behind);
+    // The same mark on a dated grant still refuses.
+    const dated_behind = try decide(t.allocator, .{
+        .payload = p_beta_valid,
+        .verified_role = .beta_license,
+        .product = "mecha-validate",
+        .app_major = 1,
+        .app_minor = 0,
+        .now_utc_date = "2026-09-17",
+        .clock_high_water = "2026-09-20",
+    });
+    try t.expectEqual(Decision.clock_rollback, dated_behind);
+}
+
 test "operation gating: features full covers any operation; ungrantable op refused" {
     try t.expectEqual(Decision.authorized, try decide(t.allocator, .{
         .payload = p_beta_valid,
@@ -1030,6 +1062,7 @@ const EvalV2 = struct {
     major: u32 = 1,
     minor: u32 = 0,
     now: []const u8 = "2026-10-17",
+    hwm: ?[]const u8 = null,
     expect: Decision,
 };
 
@@ -1058,6 +1091,14 @@ const manifest_v2_evals = [_]EvalV2{
     .{ .payload = p_beta_valid, .role = .beta_license, .minor = 99, .expect = .authorized },
     .{ .payload = p_beta_valid, .role = .beta_license, .major = 2, .expect = .version_ceiling },
     .{ .payload = p_paid_valid, .minor = 99, .expect = .authorized },
+    // Clock mark rows (contract section 9, 2026-11-11): judged only for a
+    // grant with an expiry.
+    .{ .payload = pv2_valid, .minor = 3, .hwm = "2026-10-20", .expect = .clock_rollback },
+    .{ .payload = p_beta_valid, .role = .beta_license, .now = "2026-09-20", .hwm = "2026-09-20", .expect = .authorized },
+    .{ .payload = p_beta_valid, .role = .beta_license, .now = "2026-09-17", .hwm = "2026-09-20", .expect = .clock_rollback },
+    .{ .payload = p_beta_valid, .role = .beta_license, .now = "2026-10-18", .hwm = "2026-10-20", .expect = .clock_rollback },
+    .{ .payload = p_paid_valid, .now = "2026-09-17", .hwm = "2026-09-20", .expect = .authorized },
+    .{ .payload = p_paid_valid, .major = 2, .now = "2026-09-17", .hwm = "2026-09-20", .expect = .version_ceiling },
 };
 
 test "manifest evals: every expected decision from mecha-license-vectors/2" {
@@ -1069,6 +1110,7 @@ test "manifest evals: every expected decision from mecha-license-vectors/2" {
             .app_major = e.major,
             .app_minor = e.minor,
             .now_utc_date = e.now,
+            .clock_high_water = e.hwm,
         });
         if (got != e.expect) {
             std.debug.print("v2 eval[{d}]: expected {s}, got {s}\n", .{ i, e.expect.name(), got.name() });

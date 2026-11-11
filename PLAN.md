@@ -16,6 +16,7 @@
       sigil's manifest.json when the sibling checkout exists (drift guard)
 
 ## Completed
+- [x] Clock mark judged only for dated grants (0.3.0, ABI 2 unchanged; sigil contract section 9, 2026-11-11): decide no longer answers clock_rollback for a grant with no expiry; decide_install unchanged; decide_v2.sh passes the manifest's clock_high_water; mutant that never judges the mark killed by 3 unit tests. — 2026-11-11 13:50 EST
 - [x] Calendar validity (0.2.1, ABI 2 unchanged): isValidDate accepted
       impossible dates such as 2026-02-30 for the injected now and for signed
       purchase/expiry/issued fields; it now uses proleptic Gregorian month

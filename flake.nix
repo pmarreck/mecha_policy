@@ -11,7 +11,7 @@
       let
         pkgs = import nixpkgs { inherit system; };
         pname = "mecha_policy";
-        version = "0.2.1";
+        version = "0.3.0";
         zigPkg = pkgs.zig;
       in {
         packages.default = pkgs.stdenv.mkDerivation {

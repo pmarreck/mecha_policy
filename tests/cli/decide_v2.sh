@@ -29,13 +29,17 @@ for ((i = 0; i < nv; i++)); do
 	if ! "$SIGIL" verify "$V/$f" --pubkey "$V/$pub" -q > "$WORK/p.json" 2>/dev/null; then fail "$f verifies under $r"; continue; fi
 	ne=$(jq ".vectors[$i].policy_evals | length" "$M")
 	for ((j = 0; j < ne; j++)); do
-		read -r now prod ma mi want < <(jq -r ".vectors[$i].policy_evals[$j] | \"\(.now_utc_date) \(.product) \(.app_major) \(.app_minor) \(.expect)\"" "$M")
-		got=$("$BIN" decide --payload "$WORK/p.json" --role "$role" --product "$prod" --app-major "$ma" --app-minor "$mi" --now "$now" 2>/dev/null)
-		[[ "$got" == "$want" ]] && pass "$f $prod $ma.$mi @ $now -> $want" || fail "$f $prod $ma.$mi @ $now" "want $want got $got"
+		read -r now hwm prod ma mi want < <(jq -r ".vectors[$i].policy_evals[$j] | \"\(.now_utc_date) \(.clock_high_water // \"-\") \(.product) \(.app_major) \(.app_minor) \(.expect)\"" "$M")
+		# An eval with clock_high_water passes that stored mark; without it, none.
+		mark=(); at="$now"
+		[[ "$hwm" != - ]] && { mark=(--hwm "$hwm"); at="$now (mark $hwm)"; marks=$((${marks:-0} + 1)); }
+		got=$("$BIN" decide --payload "$WORK/p.json" --role "$role" --product "$prod" --app-major "$ma" --app-minor "$mi" --now "$now" "${mark[@]}" 2>/dev/null)
+		[[ "$got" == "$want" ]] && pass "$f $prod $ma.$mi @ $at -> $want" || fail "$f $prod $ma.$mi @ $at" "want $want got $got"
 		rows=$((rows + 1))
 	done
 done
 [[ $rows -ge 20 ]] && pass "$rows manifest evals exercised" || fail "manifest evals exercised" "$rows"
+[[ ${marks:-0} -ge 4 ]] && pass "${marks:-0} of them pass a stored clock mark" || fail "manifest evals with a clock mark" "${marks:-0}"
 "$BIN" decide --payload "$WORK/p.json" --role paid-license --product mecha-validate --app-major 1 --now 2026-10-17 > /dev/null 2> "$WORK/err"; rc=$?
 [[ $rc -eq 64 ]] && grep -q -- '--app-minor' "$WORK/err" && pass "decide without --app-minor is a usage error naming it" || fail "decide requires --app-minor" "rc=$rc"
 "$BIN" decide --payload "$WORK/p.json" --role paid-license --product mecha-validate --app-major 1 --app-minor -1 --now 2026-10-17 > /dev/null 2>&1; rc=$?
